@@ -8,6 +8,9 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPainterPath
 from PySide6.QtWidgets import QMenu, QComboBox, QSlider
+from PySide6.QtWebEngineCore import QWebEngineSettings
+from folium.plugins import MousePosition
+
 
 
 class ResponsiveWebView(QWebEngineView):
@@ -113,36 +116,6 @@ class ResponsiveWebView(QWebEngineView):
         menu.exec_(event.globalPos())
         
         
-    def _center_map_at_point(self, pos):
-        # Convert screen coordinates to map coordinates and center
-        js = """
-        function getLatLngFromPoint(x, y) {
-            var point = L.point(x, y);
-            var latLng = map.containerPointToLatLng(point);
-            return [latLng.lat, latLng.lng];
-        }
-        getLatLngFromPoint(%d, %d);
-        """ % (pos.x(), pos.y())
-        
-        self.page().runJavaScript(js, lambda coords: 
-            self.page().runJavaScript(f"map.setView({coords}, map.getZoom())"))
-
-    def _copy_coordinates(self, pos):
-        js = """
-        function getLatLngFromPoint(x, y) {
-            var point = L.point(x, y);
-            var latLng = map.containerPointToLatLng(point);
-            return [latLng.lat.toFixed(6), latLng.lng.toFixed(6)];
-        }
-        getLatLngFromPoint(%d, %d);
-        """ % (pos.x(), pos.y())
-        
-        def copy_to_clipboard(coords):
-            QApplication.clipboard().setText(f"{coords[0]}, {coords[1]}")
-        
-        self.page().runJavaScript(js, copy_to_clipboard)
-    
-
     def show_map(self, folium_map):
         """Display a folium map with responsive sizing"""
         # Get the HTML from the Folium map
@@ -349,7 +322,7 @@ class MapWindow(QMainWindow):
         self.generate_button = QPushButton("Generate")
         
         sidebar_layout.addWidget(self.generate_button)
-        self.generate_button.clicked.connect(self.generate_heatmap)
+        self.generate_button.clicked.connect(self.on_generate)
 
         
         # Create map container
@@ -422,38 +395,6 @@ class MapWindow(QMainWindow):
         self.show_map()
     
     
-    def get_map_bounds(self, rect, callback):
-        """Convert screen coordinates to map coordinates"""
-        js = """
-        function getLatLngFromPoint(x, y) {
-            // Use the globally stored map instance
-            if (!window.leafletMap) {
-                console.log('Map not initialized yet');
-                return null;
-            }
-            
-            var point = L.point(x, y);
-            var latLng = window.leafletMap.containerPointToLatLng(point);
-            return [latLng.lat, latLng.lng];
-        }
-        
-        var bounds = {
-            'nw': getLatLngFromPoint(%d, %d),
-            'ne': getLatLngFromPoint(%d, %d),
-            'sw': getLatLngFromPoint(%d, %d),
-            'se': getLatLngFromPoint(%d, %d)
-        };
-        bounds;
-        """ % (
-            rect.left(), rect.top(),  # Northwest
-            rect.right(), rect.top(),  # Northeast
-            rect.left(), rect.bottom(),  # Southwest
-            rect.right(), rect.bottom()  # Southeast
-        )
-        
-        self.web_view.page().runJavaScript(js, callback)
-    
-    
     def apply_filter(self, filter_name):
         filter_style = self.filters[filter_name]
         js = f"""
@@ -464,6 +405,16 @@ class MapWindow(QMainWindow):
         # Force update the combo box text
         self.filter_combo.setCurrentText(filter_name)
         self.filter_combo.update()
+
+
+    def on_generate(self):
+        # print("DEBUG: variables.")
+        # for attr in dir(self.map):
+        #     print(attr)
+        # print("\n\n\n\nDEBUG: variables.")
+        # # Option 1: dir() - Shows all attributes and methods
+        # for var in vars(self.map):
+        #     print(var)
 
 
     def update_aspect_ratio(self):
@@ -483,24 +434,6 @@ class MapWindow(QMainWindow):
         except ValueError:
             pass  # Handle invalid input gracefully
     
-    
-    
-    def generate_heatmap(self):
-        """Handle generate button click"""
-        hole_rect = self.overlay.get_hole_bounds()
-        if hole_rect:
-            def handle_bounds(bounds):
-                if bounds and any(bounds.values()):  # Check if we got valid coordinates
-                    print("Selection bounds in coordinates:")
-                    print(f"Northwest: {bounds['nw']}")
-                    print(f"Northeast: {bounds['ne']}")
-                    print(f"Southwest: {bounds['sw']}")
-                    print(f"Southeast: {bounds['se']}")
-                else:
-                    print("Could not get map coordinates. Please wait a moment for the map to fully load and try again.")
-
-        
-        
     def toggle_map_lock(self):
         """Toggle map interaction lock"""
         is_locked = self.lock_button.isChecked()
@@ -509,27 +442,29 @@ class MapWindow(QMainWindow):
     
     def show_map(self):
         """Initialize and display a responsive folium map"""
-        m = folium.Map(
+        self.map = folium.Map(
             location=[59.4, 13.5],
             zoom_start=12,
             attributionControl=False,
             tiles='OpenStreetMap'
         )
+        formatter = "function(num) {return L.Util.formatNum(num, 3) + ' º ';};"
+
+        MousePosition(
+            position="topright",
+            separator=" | ",
+            empty_string="NaN",
+            lng_first=True,
+            num_digits=20,
+            prefix="Coordinates:",
+            lat_formatter=formatter,
+            lng_formatter=formatter,
+        ).add_to(self.map)
         
-        # Add a script to expose the map instance globally
-        m.get_root().script.add_child(folium.Element("""
-            // Store map instance globally after it's initialized
-            document.addEventListener('DOMContentLoaded', function() {
-                setTimeout(function() {
-                    var maps = document.getElementsByClassName('folium-map');
-                    if (maps.length > 0) {
-                        window.leafletMap = maps[0]._leaflet;
-                    }
-                }, 1000);  // Give map time to initialize
-            });
-        """))
+        self.map
+
         
-        self.web_view.show_map(m)
+        self.web_view.show_map(self.map)
 
     def validate_and_update_aspect(self):
         """Validate aspect ratio inputs and update overlay if valid"""
