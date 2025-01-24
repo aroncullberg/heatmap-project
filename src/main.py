@@ -1,132 +1,51 @@
 import sys
-import folium
+from PySide6.QtCore import Qt, QPointF, QRectF, QUrl, QRect, QRect, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
                               QVBoxLayout, QHBoxLayout, QPushButton,
-                              QLabel, QLineEdit, QSpacerItem, QSizePolicy,
-                              QSplitter)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPainterPath
+                              QLabel, QLineEdit, QSpacerItem, QSizePolicy)
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QImage, QPainterPath
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from typing import Dict, Tuple
 from PySide6.QtWidgets import QMenu, QComboBox, QSlider
-from PySide6.QtWebEngineCore import QWebEngineSettings
-from folium.plugins import MousePosition
+import math
+from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QPainter, QColor, QPen, QPainterPath
+from map_filters import MapFilter
+from PySide6.QtCore import QRunnable, QThreadPool, Signal, QObject, Slot
+from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QPainter, QColor, QPen, QPainterPath
 
 
+class FilterWorkerSignals(QObject):
+    finished = Signal(str, QImage)  # key, filtered_image
 
-class ResponsiveWebView(QWebEngineView):
+class FilterWorker(QRunnable):
+    def __init__(self, key: str, image: QImage, filter_name: str):
+        super().__init__()
+        self.key = key
+        self.image = image
+        self.filter_name = filter_name
+        self.signals = FilterWorkerSignals()
+
+    def run(self):
+        filtered = MapFilter.apply_filter(self.image, self.filter_name)
+        self.signals.finished.emit(self.key, filtered)
+
+
+class ClickableWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._page = self.page()
-        self._is_locked = False
-        
-        # Inject CSS to make the map fill the container
-        self._style = """
-            <style>
-                html, body {
-                    width: 100%;
-                    height: 100%;
-                    margin: 0;
-                    padding: 0;
-                }
-                #map {
-                    position: absolute;
-                    top: 0;
-                    bottom: 0;
-                    right: 0;
-                    left: 0;
-                }
-                .leaflet-container {
-                    width: 100%;
-                    height: 100%;
-                }
-            </style>
-        """
-        
-    def set_locked(self, locked):
-        """Enable or disable map interactions"""
-        self._is_locked = locked
-        if locked:
-            # Disable map interactions with CSS
-            self.page().runJavaScript("""
-                document.querySelector('.leaflet-control-zoom').style.display = 'none';
-                document.querySelector('.leaflet-container').style.pointerEvents = 'none';
-            """)
-        else:
-            # Enable map interactions
-            self.page().runJavaScript("""
-                document.querySelector('.leaflet-control-zoom').style.display = 'block';
-                document.querySelector('.leaflet-container').style.pointerEvents = 'auto';
-            """)
+        self.setFocusPolicy(Qt.ClickFocus)
             
-            
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        
-        # Add custom actions
-        center_action = menu.addAction("Center Map Here")
-        menu.addSeparator()
-        zoom_in = menu.addAction("Zoom In")
-        zoom_out = menu.addAction("Zoom Out")
-        menu.addSeparator()
-        copy_coords = menu.addAction("Copy Coordinates")
-        
-        
-        # Style the menu
-        menu.setStyleSheet("""
-            QMenu {
-                padding: 5px;
-            }
-            QMenu::item {
-                padding: 5px 30px 5px 30px;
-                color: white;
-            }
-            QMenu::item:selected {
-                background-color: #404040;
-            }
-        """)
-       
-        def handle_center():
-            js = """
-            var map = document.querySelector('#map').map;
-            var point = L.point(%d, %d);
-            var latLng = map.containerPointToLatLng(point);
-            map.setView(latLng, map.getZoom());
-            """ % (event.pos().x(), event.pos().y())
-            self.page().runJavaScript(js)
+    def mousePressEvent(self, event):
+        # Clear focus from any focused widget
+        focused_widget = QApplication.focusWidget()
+        if focused_widget:
+            focused_widget.clearFocus()
+        super().mousePressEvent(event)
 
-        def handle_copy():
-            js = """
-            var map = document.querySelector('#map').map;
-            var point = L.point(%d, %d);
-            var latLng = map.containerPointToLatLng(point);
-            [latLng.lat.toFixed(6), latLng.lng.toFixed(6)];
-            """ % (event.pos().x(), event.pos().y())
-            self.page().runJavaScript(js, lambda coords: 
-                QApplication.clipboard().setText(f"{coords[0]}, {coords[1]}"))
-            
-        
-        # Connect actions with fixed handlers
-        center_action.triggered.connect(handle_center)
-        zoom_in.triggered.connect(lambda: self.page().runJavaScript(
-            "document.querySelector('#map').map.zoomIn()"))
-        zoom_out.triggered.connect(lambda: self.page().runJavaScript(
-            "document.querySelector('#map').map.zoomOut()"))
-        copy_coords.triggered.connect(handle_copy)
-        
-        menu.exec_(event.globalPos())
-        
-        
-    def show_map(self, folium_map):
-        """Display a folium map with responsive sizing"""
-        # Get the HTML from the Folium map
-        html = folium_map.get_root().render()
-        
-        # Insert our responsive CSS
-        html = html.replace('</head>', f'{self._style}</head>')
-        
-        # Set the modified HTML
-        self.setHtml(html)
-        
+
 class TransparentOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -134,43 +53,102 @@ class TransparentOverlay(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.aspect_ratio = (16, 9)  # Default aspect ratio
-        self._hole_rect = None  # Store the hole rectangle
-
-    
-    def set_aspect_ratio(self, width, height):
-        self.aspect_ratio = (width, height)
-        self.update()  # Trigger repaint
+        self._hole_rect = QRect()
+        self._initialized = False
         
+        self._zoom_factor = 0.8  # Default zoom factor (80% of max size)
+
+        
+        # Setup animation
+        self._animation = QPropertyAnimation(self, b"hole_rect", self)
+        self._animation.setDuration(250)  # 250ms duration
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Internal target size for animation
+        self._target_size = (0, 0)
+        
+    def set_zoom_factor(self, value):
+        """Set zoom factor (0.1 to 1.0) and update hole size"""
+        self._zoom_factor = max(0.1, min(0.9, value / 100.0))  # Convert 1-10 scale to 0.1-1.0
+        if self._initialized:
+            self.update_hole_size(animate=True)
+
+    def get_hole_rect(self):
+        return self._hole_rect
+        
+    def set_hole_rect(self, rect):
+        self._hole_rect = rect
+        self.update()
+        
+    # Define the animated property
+    hole_rect = Property(QRect, get_hole_rect, set_hole_rect)
+
+    def set_aspect_ratio(self, width, height):
+        """Update the aspect ratio and trigger animation to new size"""
+        if (width, height) == self.aspect_ratio:
+            return
+            
+        self.aspect_ratio = (width, height)
+        if self._initialized:
+            self.update_hole_size(animate=True)
+
     def get_hole_bounds(self):
-        return self._hole_rect if self._hole_rect else None
-    
+        """Return the current hole rectangle"""
+        return self._hole_rect
+
+    def showEvent(self, event):
+        """Initialize hole rectangle when widget is first shown"""
+        super().showEvent(event)
+        if not self._initialized:
+            self.update_hole_size()
+            self._initialized = True
+
+    def resizeEvent(self, event):
+        """Update hole size and position when widget is resized"""
+        super().resizeEvent(event)
+        self.update_hole_size(animate=False)
+
+    def update_hole_size(self, animate=True):
+        """Calculate and update hole dimensions"""
+        widget_width = self.width()
+        widget_height = self.height()
+        
+        # Calculate maximum possible hole size while maintaining aspect ratio
+        if widget_width * self.aspect_ratio[1] <= widget_height * self.aspect_ratio[0]:
+            max_hole_width = int(widget_width)
+            max_hole_height = int(max_hole_width * self.aspect_ratio[1] / self.aspect_ratio[0])
+        else:
+            max_hole_height = int(widget_height)
+            max_hole_width = int(max_hole_height * self.aspect_ratio[0] / self.aspect_ratio[1])
+            
+        # Apply zoom factor to get actual hole size
+        new_hole_width = int(max_hole_width * self._zoom_factor)
+        new_hole_height = int(max_hole_height * self._zoom_factor)
+            
+        # Center position
+        x = (widget_width - new_hole_width) // 2
+        y = (widget_height - new_hole_height) // 2
+        
+        target_rect = QRect(x, y, new_hole_width, new_hole_height)
+        
+        if animate:
+            self._animation.stop()
+            self._animation.setStartValue(self._hole_rect)
+            self._animation.setEndValue(target_rect)
+            self._animation.start()
+        else:
+            self._hole_rect = target_rect
+            self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        # Calculate hole dimensions maintaining aspect ratio
-        width = self.width()
-        height = self.height()
-        
-        
-        if width * self.aspect_ratio[1] <= height * self.aspect_ratio[0]:
-            hole_width = int(width * 0.8)
-            hole_height = int(hole_width * self.aspect_ratio[1] / self.aspect_ratio[0])
-        else:
-            hole_height = int(height * 0.8)
-            hole_width = int(hole_height * self.aspect_ratio[0] / self.aspect_ratio[1])
-        
-        x = (width - hole_width) // 2
-        y = (height - hole_height) // 2
-                
-        # Store the hole rectangle
-        self._hole_rect = QRect(x, y, hole_width, hole_height)
         
         # Create a path for the entire widget
         full_path = QPainterPath()
         full_path.addRect(self.rect())
         
-        # Create a path for the hole
+        # Create a path for the hole using current animated rect
         hole_path = QPainterPath()
         hole_path.addRect(self._hole_rect)
         
@@ -183,31 +161,388 @@ class TransparentOverlay(QWidget):
         painter.drawPath(final_path)
         
         # Draw white border around the hole
-        painter.setPen(QPen(Qt.white, 2))
+        painter.setPen(QPen(QColor(255, 102, 0, 128), 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(self._hole_rect)
+
+
+class MapView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        
+        self.zoom_level = 12
+        self.pan_x = 0
+        self.pan_y = 0
+        self.last_mouse_pos = None
+        self.is_panning = False
+        self.tile_cache = {}
+        self.pending_requests = {}
+        self.network_manager = QNetworkAccessManager()
+        self.network_manager.finished.connect(self.handle_tile_response)
+        self.setMouseTracking(True)
+        self.tile_url_template = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        self.current_painter = None
+        self.initial_location = (59.4, 13.5)  # Initial coordinates
+        self.threadpool = QThreadPool()
+        self.current_filter = None
+        self.filter_workers = {}  # Track active workers
+        self.filtered_cache = {}
+        
+        self.setMinimumSize(1280, 720)
+
+
+
+        
+        self.overlay = TransparentOverlay(self)
+    
+    
+    def process_filtered_tile(self, key: str, filtered_image: QImage):
+        """Callback when filter processing completes"""
+        self.filtered_cache[key] = filtered_image
+        if key in self.filter_workers:
+            del self.filter_workers[key]
+        self.update()
+
+
+    def get_tile(self, x: int, y: int, zoom: int) -> QImage:
+        key = self.tile_key(x, y, zoom)
+        filter_key = f"{key}_{self.current_filter}"
+
+        # Return cached filtered tile if available
+        if filter_key in self.filtered_cache:
+            return self.filtered_cache[filter_key]
+
+        # Get original tile
+        if key not in self.tile_cache:
+            self.request_tile(x, y, zoom)
+            return None
+
+        original_tile = self.tile_cache[key]
+
+        # Return original if no filter
+        if self.current_filter == "None":
+            return original_tile
+
+        # Start filter processing in background if not already processing
+        if filter_key not in self.filter_workers:
+            worker = FilterWorker(filter_key, original_tile, self.current_filter)
+            worker.signals.finished.connect(self.process_filtered_tile)
+            self.filter_workers[filter_key] = worker
+            self.threadpool.start(worker)
+
+        # Return original tile while filter processes
+        return original_tile
+
+
+
+    
+    def zoom_to(self, new_zoom: int, center_x: float = None, center_y: float = None):
+        """
+        Shared zoom logic that can be used by both wheel and button events
+        
+        Args:
+            new_zoom: Target zoom level
+            center_x: X coordinate to zoom around (defaults to center if None)
+            center_y: Y coordinate to zoom around (defaults to center if None)
+        """
+        # Clamp zoom level
+        new_zoom = max(0, min(19, new_zoom))
+        
+        if new_zoom == self.zoom_level:
+            return
+            
+        # Use widget center if no center point specified
+        if center_x is None:
+            center_x = self.width() / 2
+        if center_y is None:
+            center_y = self.height() / 2
+            
+        # Convert center position to world coordinates before zoom
+        world_x = (center_x - self.pan_x)
+        world_y = (center_y - self.pan_y)
+        
+        # Calculate the scale factor between zoom levels
+        scale_factor = 2 ** (new_zoom - self.zoom_level)
+        
+        # Calculate new world coordinates
+        new_world_x = world_x * scale_factor
+        new_world_y = world_y * scale_factor
+        
+        # Update pan to keep the center point fixed
+        self.pan_x = center_x - new_world_x
+        self.pan_y = center_y - new_world_y
+        
+        # Update zoom level
+        self.zoom_level = new_zoom
+        self.overlay.raise_()
+        # Refresh the view
+        self.clear_cache()
+        self.update()
+        
+    def set_filter(self, filter_name: str):
+        """Set the current filter and clear filtered cache"""
+        if self.current_filter != filter_name:
+            self.current_filter = filter_name
+            self.filtered_cache.clear()
+            self.filter_workers.clear()  # Cancel any pending filter operations
+            self.update()
+
+    
+    
+    
+    def resizeEvent(self, event):
+        """Ensure overlay resizes with the map"""
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.rect())
+        
+    def get_selection_bounds(self):
+        """Convert the overlay hole bounds to map coordinates"""
+        hole_rect = self.overlay.get_hole_bounds()
+        if not hole_rect:
+            return None
+            
+        # Convert screen coordinates to map coordinates
+        def screen_to_map(x, y):
+            # Adjust for pan offset
+            map_x = x - self.pan_x
+            map_y = y - self.pan_y
+            
+            # Calculate tile coordinates
+            tile_x = map_x / 256
+            tile_y = map_y / 256
+            
+            # Convert to lat/lon
+            n = 2.0 ** self.zoom_level
+            lon_deg = (tile_x / n * 360.0) - 180.0
+            lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * tile_y / n)))
+            lat_deg = math.degrees(lat_rad)
+            
+            return (lat_deg, lon_deg)
+            
+        # Get bounds
+        nw = screen_to_map(hole_rect.left(), hole_rect.top())
+        ne = screen_to_map(hole_rect.right(), hole_rect.top())
+        sw = screen_to_map(hole_rect.left(), hole_rect.bottom())
+        se = screen_to_map(hole_rect.right(), hole_rect.bottom())
+        
+        return {
+            'nw': nw,
+            'ne': ne,
+            'sw': sw,
+            'se': se
+        }
+        
+    def set_aspect_ratio(self, width, height):
+        """Update the overlay's aspect ratio"""
+        self.overlay.set_aspect_ratio(width, height)
+
+
+    def zoom_in(self):
+        """Zoom in one level, centered on viewport"""
+        self.zoom_to(self.zoom_level + 1)
+        
+    def zoom_out(self):
+        """Zoom out one level, centered on viewport"""
+        self.zoom_to(self.zoom_level - 1)
+
+    def showEvent(self, event):
+        """Center on initial location when the widget is first shown."""
+        super().showEvent(event)
+        if self.initial_location:
+            lat, lon = self.initial_location
+            self.center_on_location(lat, lon)
+            self.initial_location = None  # Prevent re-centering
+
+    def tile_key(self, x: int, y: int, zoom: int) -> str:
+        """Generate unique key for tile caching"""
+        return f"{zoom}_{x}_{y}"
+    
+    def geo_to_pixel(self, lat: float, lon: float, zoom: int) -> Tuple[float, float]:
+        """Convert latitude/longitude to pixel coordinates at a given zoom level."""
+        lat_rad = math.radians(lat)
+        n = 2.0 ** zoom
+        x = (lon + 180.0) / 360.0 * n * 256  # Pixel X coordinate
+        y = (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n * 256  # Pixel Y
+        return x, y
+
+
+    def center_on_location(self, lat: float, lon: float):
+        """Center the map view on a geographic coordinate."""
+        # Get pixel coordinates for the location
+        pixel_x, pixel_y = self.geo_to_pixel(lat, lon, self.zoom_level)
+        
+        # Adjust pan offsets to center the view
+        self.pan_x = (self.width() / 2 - pixel_x)
+        self.pan_y = (self.height() / 2 - pixel_y)
+        
+        # Clear cache and reload tiles
+        self.clear_cache()
+        self.update()
+
+
+    def request_tile(self, x: int, y: int, zoom: int):
+        """Request a map tile if not already cached or pending"""
+        key = self.tile_key(x, y, zoom)
+        if key in self.tile_cache or key in self.pending_requests:
+            return
+            
+        url = self.tile_url_template.replace("{z}", str(zoom)) \
+                                .replace("{x}", str(x)) \
+                                .replace("{y}", str(y))
+                                
+        request = QNetworkRequest(QUrl(url))
+        # Store the key in the request
+        request.setAttribute(QNetworkRequest.User, key)  # Use User attribute
+        
+        # Set a valid User-Agent header
+        user_agent = "HeatmapApp/1.0 (contact@example.com)"  # Replace with your contact info
+        request.setHeader(QNetworkRequest.UserAgentHeader, user_agent)
+
+        self.pending_requests[key] = None
+        self.network_manager.get(request)
+
+
+    def handle_tile_response(self, reply):
+        """Handle network response for tile request"""
+        key = reply.request().attribute(QNetworkRequest.Attribute.User)
+        
+        if reply.error() == QNetworkReply.NoError:
+            image_data = reply.readAll()
+            image = QImage()
+            image.loadFromData(image_data)
+            
+            if not image.isNull():
+                self.tile_cache[key] = image
+                self.update()
+        else:
+        # Optional: Log the error for debugging
+            print(f"Error loading tile: {reply.errorString()}") 
+                
+        reply.deleteLater()
+        if key in self.pending_requests:
+            del self.pending_requests[key]
+            
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_panning = True
+            self.last_mouse_pos = event.position()
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_panning = False
+            self.setCursor(Qt.ArrowCursor)
+
+    def mouseMoveEvent(self, event):
+        if self.is_panning and self.last_mouse_pos:
+            delta = event.position() - self.last_mouse_pos
+            self.pan_x += delta.x()
+            self.pan_y += delta.y()
+            self.last_mouse_pos = event.position()
+            self.update()
+
+    def wheelEvent(self, event):
+        """Handle mouse wheel events for zooming"""
+        delta = event.angleDelta().y()
+        zoom_change = 1 if delta > 0 else -1 if delta < 0 else 0
+        new_zoom = self.zoom_level + zoom_change
+        
+        # Use mouse position as zoom center
+        mouse_pos = event.position()
+        self.zoom_to(new_zoom, mouse_pos.x(), mouse_pos.y())
+
+
+
+
+    def paintEvent(self, event):
+        try:
+            painter = QPainter(self)
+            self.current_painter = painter
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Fill background
+            painter.fillRect(self.rect(), QColor(240, 240, 240))
+            
+            # Calculate visible area
+            tile_size = 256  # OSM tile size
+            scale = 2 ** self.zoom_level
+            
+            # Calculate visible tile range
+            viewport_left = -self.pan_x
+            viewport_top = -self.pan_y
+            viewport_right = viewport_left + self.width()
+            viewport_bottom = viewport_top + self.height()
+            
+            # Convert to tile coordinates
+            start_x = max(0, int(viewport_left / tile_size))
+            start_y = max(0, int(viewport_top / tile_size))
+            end_x = min(scale - 1, int(viewport_right / tile_size) + 1)
+            end_y = min(scale - 1, int(viewport_bottom / tile_size) + 1)
+            
+            # Draw visible tiles
+            for x in range(start_x, end_x + 1):
+                for y in range(start_y, end_y + 1):
+                    tile = self.get_tile(x, y, self.zoom_level)
+                    if tile:
+                        dest_rect = QRectF(
+                            x * tile_size + self.pan_x,
+                            y * tile_size + self.pan_y,
+                            tile_size,
+                            tile_size
+                        )
+                        painter.drawImage(dest_rect, tile)
+                    else:
+                        # Draw placeholder for loading tiles
+                        painter.fillRect(
+                            QRectF(
+                                x * tile_size + self.pan_x,
+                                y * tile_size + self.pan_y,
+                                tile_size,
+                                tile_size
+                            ),
+                            QColor(200, 200, 200)
+                        )
+        finally:
+            if self.current_painter:
+                self.current_painter.end()
+                self.current_painter = None
+                
+                
+    def clear_cache(self):
+        self.tile_cache.clear()
+        self.pending_requests.clear()
+        self.filter_workers.clear()  # Cancel any pending workers
+        self.update()
+
 
 class MapWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        
-        self.setWindowTitle("Map with Overlay")
+        self.setWindowTitle("Map Selector")
         self.setGeometry(100, 100, 1200, 800)
         
-        self.setMinimumSize(1280, 720)
-        
-        # Create central widget and layout
-        central_widget = QWidget()
+        # Create central widget
+        central_widget = ClickableWidget()
         self.setCentralWidget(central_widget)
         layout = QHBoxLayout(central_widget)
         
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
         # Create sidebar
+        sidebar = self.create_sidebar()
+        layout.addWidget(sidebar)
+        
+        # Create map view
+        self.map_view = MapView()
+        self.map_view.set_aspect_ratio(16, 9)
+        layout.addWidget(self.map_view)
+        central_widget.setFocus()
+        
+    def create_sidebar(self):
         sidebar = QWidget()
-        sidebar.setMinimumWidth(200)
-        sidebar.setMaximumWidth(300)
+        sidebar.setFixedWidth(300)
         sidebar_layout = QVBoxLayout(sidebar)
         
         # Add title
@@ -226,14 +561,19 @@ class MapWindow(QMainWindow):
         
         res_input_layout = QHBoxLayout()
         self.res_width = QLineEdit("1920")
+        self.res_height = QLineEdit("1080")
         res_input_layout.addWidget(self.res_width)
         res_input_layout.addWidget(QLabel("x"))
-        self.res_height = QLineEdit("1080")
         res_input_layout.addWidget(self.res_height)
         
+        
+        self.res_height.textChanged.connect(self.validate_input)
+        self.res_width.textChanged.connect(self.validate_input)
+
         res_layout.addLayout(res_input_layout)
         sidebar_layout.addLayout(res_layout)
-        
+
+
         # Aspect ratio inputs
         aspect_layout = QVBoxLayout()
         aspect_label = QLabel("Aspect Ratio:")
@@ -241,248 +581,129 @@ class MapWindow(QMainWindow):
         
         aspect_input_layout = QHBoxLayout()
         self.aspect_width = QLineEdit("16")
+        self.aspect_height = QLineEdit("9")
         aspect_input_layout.addWidget(self.aspect_width)
         aspect_input_layout.addWidget(QLabel("x"))
-        self.aspect_height = QLineEdit("9")
         aspect_input_layout.addWidget(self.aspect_height)
+        
+        self.aspect_height.setEnabled(False)
+        self.aspect_width.setEnabled(False)
         
         aspect_layout.addLayout(aspect_input_layout)
         sidebar_layout.addLayout(aspect_layout)
         
-        filter_layout = QVBoxLayout()
-        filter_label = QLabel("Map Filter:")
-        filter_layout.addWidget(filter_label)
-
-        self.filter_combo = QComboBox()
-        self.filter_combo.setStyleSheet("""
-            QComboBox {
-                padding: 8px;
-                font-size: 14px;
-                min-height: 24px;
-            }
-            QComboBox::drop-down {
-                border: none;
-                padding: 5px;
-            }
-            QComboBox::down-arrow {
-                width: 12px;
-                height: 12px;
-            }
-            QComboBox QAbstractItemView {
-                padding: 5px;
-                selection-background-color: #e0e0e0;
-            }
-        """)
-
-        # Add filter options
-        self.filters = {
-            "None": "",
-            "Night Mode": "invert(100%) hue-rotate(180deg)",
-            "Sepia": "sepia(100%)",
-            "Cool Tone": "hue-rotate(180deg)",
-            "Warm Tone": "hue-rotate(-30deg) saturate(120%)",
-            "High Contrast": "contrast(150%) saturate(150%)",
-            "Muted": "saturate(50%) brightness(95%)"
-        }
+        # Add zoom controls
+        zoom_layout = QHBoxLayout()
         
-        self.filter_combo.addItems(list(self.filters.keys()))
-        self.filter_combo.currentTextChanged.connect(self.apply_filter)
-        filter_layout.addWidget(self.filter_combo)
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setMinimum(0)
+        self.zoom_slider.setMaximum(19)
+        # self.zoom_slider.valueChanged.connect(set_zoom_value)
+        sidebar_layout.addWidget(self.zoom_slider)
         
-        # Add to sidebar layout
-        sidebar_layout.addLayout(filter_layout)
+        zoom_in = QPushButton("+")
+        zoom_out = QPushButton("-")
+        zoom_in.clicked.connect(lambda: self.adjust_zoom(1))
+        zoom_out.clicked.connect(lambda: self.adjust_zoom(-1))
+        zoom_layout.addWidget(zoom_out)
+        zoom_layout.addWidget(zoom_in)
+        sidebar_layout.addLayout(zoom_layout)
         
-        rotation_layout = QVBoxLayout()
-        rotation_label = QLabel("Rotation:")
-        rotation_layout.addWidget(rotation_label)
-
-        self.rotation_slider = QSlider(Qt.Horizontal)
-        self.rotation_slider.setRange(0, 359)
-        self.rotation_slider.setValue(0)
-        self.rotation_slider.setTickPosition(QSlider.TicksBelow)
-        self.rotation_slider.setTickInterval(45)
-        rotation_layout.addWidget(self.rotation_slider)
-
-        sidebar_layout.addLayout(rotation_layout)
-
-
-
-        
+        # Boundry zoom
+        bz_layout = QHBoxLayout()
+        bz = QSlider(Qt.Horizontal)
+        bz.setMinimum(0)
+        bz.setMaximum(100)
+        bz.setSliderPosition(80)
+        bz.valueChanged.connect(self.update_overlay_size)
+        bz_layout.addWidget(bz)
+        sidebar_layout.addLayout(bz_layout)
         # Add spacer
         sidebar_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         
         # Add lock button to sidebar
         self.lock_button = QPushButton("Lock")
         self.lock_button.setCheckable(True)
-        self.lock_button.clicked.connect(self.toggle_map_lock)
+        #self.lock_button.clicked.connect(self.toggle_map_lock)
         sidebar_layout.addWidget(self.lock_button)
 
         
         # Generate button
         self.generate_button = QPushButton("Generate")
-        
         sidebar_layout.addWidget(self.generate_button)
-        self.generate_button.clicked.connect(self.on_generate)
-
+        self.generate_button.clicked.connect(self.generate_heatmap)
         
-        # Create map container
-        map_container = QWidget()
-        map_layout = QVBoxLayout(map_container)
-        map_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create and add the responsive map view
-        self.web_view = ResponsiveWebView()
-        map_layout.addWidget(self.web_view)
-        
-        # Create and add the overlay
-        self.overlay = TransparentOverlay(map_container)
-        self.overlay.setGeometry(map_container.rect())
-        
-        
-        # Make sure overlay resizes with container
-        map_container.resizeEvent = lambda event: self.overlay.setGeometry(
-            map_container.rect()
-        )
-        
-        
-        # Add widgets to main layout
-        layout.addWidget(sidebar)
-        layout.addWidget(map_container)
-        
-        # Set fixed width for sidebar
-        sidebar.setFixedWidth(300)
-        
-        self.aspect_width.textChanged.connect(self.validate_and_update_aspect)
-        self.aspect_height.textChanged.connect(self.validate_and_update_aspect)
-
-        input_style = """
-            QLineEdit {
-                padding: 8px;
-                font-size: 18px;
-                min-height: 24px;
-            }
-        """
-        # Style for buttons
-        button_style = """
-            QPushButton {
-                padding: 10px;
-                font-size: 14px;
-                min-height: 40px;
-            }
-        """
-
-        # Style for labels
-        label_style = """
-            QLabel {
-                font-size: 14px;
-                padding: 5px;
-            }
-        """
-        
-        # Apply styles
-        self.res_width.setStyleSheet(input_style)
-        self.res_height.setStyleSheet(input_style)
-        self.aspect_width.setStyleSheet(input_style)
-        self.aspect_height.setStyleSheet(input_style)
-        
-        # Apply to all labels
-        for label in self.findChildren(QLabel):
-            label.setStyleSheet(label_style)
-
-
-
-        # Initialize the map
-        self.show_map()
+        return sidebar
     
-    
-    def apply_filter(self, filter_name):
-        filter_style = self.filters[filter_name]
-        js = f"""
-            document.querySelector('.leaflet-container').style.filter = '{filter_style}';
-        """
-        self.web_view.page().runJavaScript(js)
-        
-        # Force update the combo box text
-        self.filter_combo.setCurrentText(filter_name)
-        self.filter_combo.update()
-
-
-    def on_generate(self):
-        # print("DEBUG: variables.")
-        # for attr in dir(self.map):
-        #     print(attr)
-        # print("\n\n\n\nDEBUG: variables.")
-        # # Option 1: dir() - Shows all attributes and methods
-        # for var in vars(self.map):
-        #     print(var)
-
-
-    def update_aspect_ratio(self):
-        try:
-            width = int(self.aspect_width.text())
-            height = int(self.aspect_height.text())
-            print(f"Aspect ratio changed to: {width}x{height}")
-            self.overlay.set_aspect_ratio(width, height)
-        except ValueError:
-            pass  # Handle invalid input gracefully
-    
-    def update_resolution(self):
-        try:
-            width = int(self.res_width.text())
-            height = int(self.res_height.text())
-            print(f"Resolution changed to: {width}x{height}")
-        except ValueError:
-            pass  # Handle invalid input gracefully
-    
-    def toggle_map_lock(self):
-        """Toggle map interaction lock"""
-        is_locked = self.lock_button.isChecked()
-        self.lock_button.setText("Unlock" if is_locked else "Lock")
-        self.web_view.set_locked(is_locked)
-    
-    def show_map(self):
-        """Initialize and display a responsive folium map"""
-        self.map = folium.Map(
-            location=[59.4, 13.5],
-            zoom_start=12,
-            attributionControl=False,
-            tiles='OpenStreetMap'
-        )
-        formatter = "function(num) {return L.Util.formatNum(num, 3) + ' º ';};"
-
-        MousePosition(
-            position="topright",
-            separator=" | ",
-            empty_string="NaN",
-            lng_first=True,
-            num_digits=20,
-            prefix="Coordinates:",
-            lat_formatter=formatter,
-            lng_formatter=formatter,
-        ).add_to(self.map)
-        
-        self.map
-
-        
-        self.web_view.show_map(self.map)
-
-    def validate_and_update_aspect(self):
-        """Validate aspect ratio inputs and update overlay if valid"""
-        try:
-            width = self.aspect_width.text()
-            height = self.aspect_height.text()
+    def calculate_aspect_ratio(self, width: int, height: int) -> tuple[int, int]:
+        """Calculate the simplified aspect ratio from dimensions."""
+        if width <= 0 or height <= 0:
+            return (16, 9)  # Default aspect ratio
             
-            # TODO: Add your validation logic here
-            # For example: check if numbers are positive, within certain range, etc.
+        def gcd(a: int, b: int) -> int:
+            """Calculate greatest common divisor using Euclidean algorithm."""
+            while b:
+                a, b = b, a % b
+            return a
             
-            width_val = int(width)
-            height_val = int(height)
+        divisor = gcd(width, height)
+        return (width // divisor, height // divisor)
+
+    def validate_input(self):
+        """Validate resolution inputs and update aspect ratio."""
+        try:
+            width = int(self.res_width.text() or "0")
+            height = int(self.res_height.text() or "0")
             
-            if width_val > 0 and height_val > 0:  # Basic validation
-                self.overlay.set_aspect_ratio(width_val, height_val)
+            # Reset to default values if invalid
+            if width <= 0 or height <= 0:
+                self.aspect_width.setText("16")
+                self.aspect_height.setText("9")
+                return
+                
+            # Calculate and update aspect ratio
+            aspect_width, aspect_height = self.calculate_aspect_ratio(width, height)
+            
+            # Update display fields
+            self.aspect_width.setText(str(aspect_width))
+            self.aspect_height.setText(str(aspect_height))
+            
+            # Update map selection bounds
+            self.map_view.set_aspect_ratio(aspect_width, aspect_height)
+            
+            # Visual feedback for valid input
+            self.res_width.setStyleSheet("")
+            self.res_height.setStyleSheet("")
+            
         except ValueError:
-            pass  # Handle invalid input
+            # Visual feedback for invalid input
+            self.res_width.setStyleSheet("QLineEdit { background: #fd0f00; }")
+            self.res_height.setStyleSheet("QLineEdit { background: #fd0f00; }")
+
+
+    def update_overlay_size(self, value):
+        """Update the overlay hole size based on slider value"""
+        self.map_view.overlay.set_zoom_factor(value)
+
     
+    def generate_heatmap(self):
+        """Handle generate button click"""
+        bounds = self.map_view.get_selection_bounds()
+        if bounds:
+            print("Selection bounds in coordinates:")
+            print(f"Northwest: {bounds['nw']}")
+            print(f"Northeast: {bounds['ne']}")
+            print(f"Southwest: {bounds['sw']}")
+            print(f"Southeast: {bounds['se']}")
+            
+    def adjust_zoom(self, delta: int):
+        """Adjust map zoom level using buttons"""
+        if delta > 0:
+            self.map_view.zoom_in()
+        else:
+            self.map_view.zoom_out()
+
+
 def main():
     app = QApplication(sys.argv)
     window = MapWindow()
